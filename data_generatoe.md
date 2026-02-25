@@ -1,5 +1,3 @@
-# 📌 CSAO Synthetic Data Generator – Team Summary
-
 ## 🎯 Objective
 
 We are building a **sequential cart recommendation training dataset** for the CSAO (Cart Super Add-On) system.
