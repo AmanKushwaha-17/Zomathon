@@ -1,0 +1,36 @@
+# Environment
+.env
+.env.local
+
+# Large data files (>100MB GitHub limit / keep repo lean)
+csao_ranking_data_v3_personalized.csv
+csao_feature_artifacts.npz
+csao_lambdarank_model.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Temp files
+tmp_*.py
+*.tmp
+relevance_results.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Old typo file
+data_generatoe.md

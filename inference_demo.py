@@ -56,7 +56,7 @@ items_df = df[[
     "candidate_category",
     "candidate_price",
     "candidate_popularity"
-]].drop_duplicates()
+]].drop_duplicates(subset=["candidate_item"])
 
 items_df = items_df.rename(columns={
     "candidate_item": "item_id",
@@ -162,14 +162,36 @@ def async_generate_and_cache(key, cart_name, recommended_name):
 
 
 
+
 # -----------------------------
-# Simulate Cart
+# Simulate Cart (Production Style)
 # -----------------------------
 
+# Simulated contextual request
 user_type = "Regular"
+restaurant_id = 12
+
+# Derive city & cuisine from the restaurant's actual data
+_restaurant_rows = df[df["restaurant_id"] == restaurant_id]
+city = _restaurant_rows["city"].iloc[0]
+cuisine = _restaurant_rows["cuisine"].iloc[0]
+
+hour_of_day = 20
+day_of_week = 5
+is_weekend = 1
+meal_type = "Dinner"
+
 cart_items = [62]
 
 cart_df = items_df[items_df["item_id"].isin(cart_items)]
+
+# -----------------------------
+# Cart Summary
+# -----------------------------
+print("\n[Cart] Current Cart:\n")
+for _, crow in cart_df.iterrows():
+    print(f"  - {crow['item_name']} ({crow['category']}) -- Rs.{crow['price']}")
+print(f"\n  Cart Total: Rs.{cart_df['price'].sum()}")
 
 cart_size = len(cart_items)
 cart_value = cart_df["price"].sum()
@@ -181,7 +203,6 @@ count_drink = (cart_df["category"] == "Drink").sum()
 
 last_category = cart_df.iloc[-1]["category"]
 
-
 # -----------------------------
 # Compute Cart Embedding
 # -----------------------------
@@ -189,44 +210,41 @@ cart_vectors = [item_embeddings[item] for item in cart_items]
 cart_embedding = np.mean(cart_vectors, axis=0)
 cart_embedding = cart_embedding / np.linalg.norm(cart_embedding)
 
-
-
-# Start total pipeline timing
 start_total = time.perf_counter()
 
 # -----------------------------
-# Stage 1: Candidate Generation (Balanced)
-# Primary + Secondary Pool
+# Stage 1: Candidate Generation (Restaurant Scoped)
 # -----------------------------
+restaurant_candidates = items_df[
+    (items_df["item_id"].isin(
+        df[df["restaurant_id"] == restaurant_id]["candidate_item"].unique()
+    )) &
+    (~items_df["item_id"].isin(cart_items))
+].copy()
+
+if restaurant_candidates.empty:
+    print("No candidates found for this restaurant.")
+    exit()
+
 if last_category in TRANSITIONS:
     primary_categories = list(TRANSITIONS[last_category].keys())
 else:
-    primary_categories = items_df["category"].unique()
+    primary_categories = restaurant_candidates["category"].unique()
 
+primary_candidates = restaurant_candidates[
+    restaurant_candidates["category"].isin(primary_categories)
+]
 
-# Primary pool (transition-based)
-primary_candidates = items_df[
-    (items_df["category"].isin(primary_categories)) &
-    (~items_df["item_id"].isin(cart_items))
-].copy()
+secondary_candidates = restaurant_candidates[
+    ~restaurant_candidates["category"].isin(primary_categories)
+].sort_values("popularity", ascending=False).head(10)
 
-# Secondary pool (exploration - top popular items from other categories)
-secondary_candidates = items_df[
-    (~items_df["category"].isin(primary_categories)) &
-    (~items_df["item_id"].isin(cart_items))
-].copy()
-
-
-
-# Take top popular from secondary pool (exploration quota)
-secondary_candidates = secondary_candidates.sort_values(
-    "popularity", ascending=False
-).head(10)
-
-# Combine pools
 candidates = pd.concat([primary_candidates, secondary_candidates])
+candidates = candidates.drop_duplicates(subset=["item_id"])
 
-# Compute transition probability
+# -----------------------------
+# Feature Engineering
+# -----------------------------
 def get_transition_prob(last_cat, candidate_cat):
     if last_cat in TRANSITIONS:
         return TRANSITIONS[last_cat].get(candidate_cat, 0)
@@ -236,16 +254,20 @@ candidates["transition_probability"] = candidates["category"].apply(
     lambda x: get_transition_prob(last_category, x)
 )
 
-# Compute embedding similarity
 candidates["embedding_similarity"] = candidates["item_id"].apply(
     lambda x: np.dot(cart_embedding, item_embeddings[x])
 )
 
-
-# -----------------------------
-# Add Context Features
-# -----------------------------
+# Add contextual features
 candidates["user_type"] = user_type
+candidates["restaurant_id"] = restaurant_id
+candidates["city"] = city
+candidates["cuisine"] = cuisine
+candidates["hour_of_day"] = hour_of_day
+candidates["day_of_week"] = day_of_week
+candidates["is_weekend"] = is_weekend
+candidates["meal_type"] = meal_type
+
 candidates["cart_size"] = cart_size
 candidates["cart_value"] = cart_value
 candidates["count_main"] = count_main
@@ -259,6 +281,13 @@ candidates["candidate_popularity"] = candidates["popularity"]
 
 feature_cols = [
     "user_type",
+    "restaurant_id",
+    "city",
+    "cuisine",
+    "hour_of_day",
+    "day_of_week",
+    "is_weekend",
+    "meal_type",
     "cart_size",
     "cart_value",
     "count_main",
@@ -275,58 +304,95 @@ feature_cols = [
 
 X_infer = candidates[feature_cols].copy()
 
-for col in ["user_type", "last_category", "candidate_category"]:
+for col in [
+    "user_type",
+    "restaurant_id",
+    "city",
+    "cuisine",
+    "meal_type",
+    "last_category",
+    "candidate_category"
+]:
     X_infer[col] = X_infer[col].astype("category")
 
-# Measure Ranking Time
+# -----------------------------
+# Ranking
+# -----------------------------
 start_ranking = time.perf_counter()
 scores = model.predict(X_infer)
 end_ranking = time.perf_counter()
+
 ranking_time = (end_ranking - start_ranking) * 1000
 
 candidates["score"] = scores
-
-# Stage 2: Diversity (soft category limit)
-# Ensure variety while respecting ranking
 candidates_sorted = candidates.sort_values("score", ascending=False)
 
-top8 = []
+# -----------------------------
+# Diversity Layer (Round-Robin Interleave)
+# -----------------------------
+# Group best candidates per category (max 3 each)
 category_limit = 3
-category_count = {}
-
+category_buckets = {}
 for _, row in candidates_sorted.iterrows():
     cat = row["category"]
+    if cat not in category_buckets:
+        category_buckets[cat] = []
+    if len(category_buckets[cat]) < category_limit:
+        category_buckets[cat].append(row)
 
-    if category_count.get(cat, 0) < category_limit:
-        top8.append(row)
-        category_count[cat] = category_count.get(cat, 0) + 1
+# Round-robin interleave across categories for visual variety
+top8 = []
+category_order = list(category_buckets.keys())
+idx_per_cat = {cat: 0 for cat in category_order}
 
-    if len(top8) == 8:
+while len(top8) < 8:
+    added = False
+    for cat in category_order:
+        if len(top8) >= 8:
+            break
+        if idx_per_cat[cat] < len(category_buckets[cat]):
+            top8.append(category_buckets[cat][idx_per_cat[cat]])
+            idx_per_cat[cat] += 1
+            added = True
+    if not added:
         break
 
 top8 = pd.DataFrame(top8)
+top8 = top8.sort_values("score", ascending=False)
 
-print("\nTop 8 Recommendations:\n")
-print(top8[["item_id", "item_name", "category", "price", "score"]])
-print("\nUser Type:", user_type)
-print("Cart Items:", cart_items)
-print("Last Category:", last_category)
+# Normalize scores to 0–100 for display
+raw_scores = top8["score"].values
+score_min, score_max = raw_scores.min(), raw_scores.max()
+if score_max != score_min:
+    top8["relevance"] = ((raw_scores - score_min) / (score_max - score_min) * 100).round(1)
+else:
+    top8["relevance"] = 100.0
 
-# Generate AI explanation for top recommendation (cache-first + async fallback)
+print("\n[Top 8] Recommendations:\n")
+print(top8[["item_id", "item_name", "category", "price", "relevance"]].to_string(index=False))
+
+print("\nContext:")
+print("User Type:", user_type)
+print("Restaurant:", restaurant_id)
+print("City:", city)
+print("Cuisine:", cuisine)
+print("Meal Type:", meal_type)
+
+# -----------------------------
+# LLM Explanation (Async)
+# -----------------------------
 cart_item_row = items_df[items_df["item_id"] == cart_items[0]].iloc[0]
 cart_name = cart_item_row["item_name"]
 recommended_name = top8.iloc[0]["item_name"]
+
 key = (last_category, top8.iloc[0]["category"])
 
 with cache_lock:
     cached_tooltip = explanation_cache.get(key)
 
-if cached_tooltip is not None:
+if cached_tooltip:
     print("\nAI Generated Suggestion (Cached):")
-    start_llm = time.perf_counter()
     print(cached_tooltip)
-    end_llm = time.perf_counter()
-    llm_time = (end_llm - start_llm) * 1000
 else:
     print("\nGenerating explanation asynchronously...")
     thread = threading.Thread(
@@ -334,16 +400,13 @@ else:
         args=(key, cart_name, recommended_name)
     )
     thread.start()
-    llm_time = 0.0
 
-# Calculate total time
+# -----------------------------
+# Timing
+# -----------------------------
 end_total = time.perf_counter()
 total_time = (end_total - start_total) * 1000
 
-# Print timing summary
 print("\nTiming Breakdown (ms):")
 print(f"Ranking Time: {ranking_time:.2f} ms")
-print(f"LLM Time: {llm_time:.2f} ms")
 print(f"Total Time: {total_time:.2f} ms")
-
-

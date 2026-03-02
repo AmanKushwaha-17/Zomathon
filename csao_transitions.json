@@ -1,0 +1,16 @@
+{
+  "Main": {
+    "Side": 0.5,
+    "Drink": 0.3,
+    "Main": 0.15,
+    "Dessert": 0.2
+  },
+  "Side": {
+    "Dessert": 0.3,
+    "Drink": 0.3,
+    "Side": 0.1
+  },
+  "Dessert": {
+    "Drink": 0.4
+  }
+}

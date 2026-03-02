@@ -12,10 +12,25 @@ df = pd.read_csv("csao_ranking_data_v3_personalized.csv")
 df = df.sort_values(["cart_id", "step"]).reset_index(drop=True)
 
 # -----------------------------
-# 2️⃣ Define Features
+# 2️⃣ Define Features (UPDATED)
 # -----------------------------
 feature_cols = [
+
+    # User
     "user_type",
+
+    # Restaurant Context
+    "restaurant_id",
+    "city",
+    "cuisine",
+
+    # Time Context
+    "hour_of_day",
+    "day_of_week",
+    "is_weekend",
+    "meal_type",
+
+    # Cart Context
     "cart_size",
     "cart_value",
     "count_main",
@@ -23,22 +38,32 @@ feature_cols = [
     "count_dessert",
     "count_drink",
     "last_category",
+
+    # Candidate Features
     "candidate_category",
     "candidate_price",
     "candidate_popularity",
     "transition_probability",
-    "embedding_similarity"  # 🔥 NEW FEATURE
+    "embedding_similarity"
 ]
 
 target_col = "label"
 
-categorical_cols = ["user_type", "last_category", "candidate_category"]
+categorical_cols = [
+    "user_type",
+    "restaurant_id",
+    "city",
+    "cuisine",
+    "meal_type",
+    "last_category",
+    "candidate_category"
+]
 
 for col in categorical_cols:
     df[col] = df[col].astype("category")
 
 # -----------------------------
-# 3️⃣ Proper Cart-Based Train/Test Split
+# 3️⃣ Cart-Based Train/Test Split
 # -----------------------------
 unique_carts = df["cart_id"].unique()
 
@@ -58,8 +83,8 @@ y_test = test_df[target_col]
 # -----------------------------
 # 4️⃣ Create Group Sizes
 # -----------------------------
-train_groups = train_df.groupby(["cart_id", "step"]).size().values
-test_groups = test_df.groupby(["cart_id", "step"]).size().values
+train_groups = train_df.groupby(["cart_id", "step"], sort=False).size().values
+test_groups = test_df.groupby(["cart_id", "step"], sort=False).size().values
 
 # -----------------------------
 # 5️⃣ Train LambdaRank Model
@@ -67,9 +92,11 @@ test_groups = test_df.groupby(["cart_id", "step"]).size().values
 model = lgb.LGBMRanker(
     objective="lambdarank",
     metric="ndcg",
-    n_estimators=150,
+    n_estimators=200,
     learning_rate=0.05,
-    num_leaves=31
+    num_leaves=63,
+    max_depth=-1,
+    min_child_samples=20
 )
 
 model.fit(
@@ -82,104 +109,67 @@ model.fit(
     categorical_feature=categorical_cols
 )
 
-print("✅ Training complete.\n")
+print("Training complete.\n")
 
 # -----------------------------
 # 6️⃣ Evaluate Model NDCG@8
 # -----------------------------
+def mean_ndcg_by_group(y_true, y_scores, groups, k=8):
+    ndcg_scores = []
+    skipped_groups = 0
+    start_idx = 0
+
+    for group_size in groups:
+        end_idx = start_idx + group_size
+        if group_size < 2:
+            skipped_groups += 1
+            start_idx = end_idx
+            continue
+
+        true_labels = y_true.iloc[start_idx:end_idx].values.reshape(1, -1)
+        pred_scores = y_scores[start_idx:end_idx].reshape(1, -1)
+        ndcg_scores.append(ndcg_score(true_labels, pred_scores, k=k))
+        start_idx = end_idx
+
+    mean_ndcg = np.mean(ndcg_scores) if ndcg_scores else 0.0
+    return mean_ndcg, skipped_groups, len(groups)
+
 y_pred = model.predict(X_test)
 
-ndcg_scores = []
-start = 0
-
-for g in test_groups:
-    end = start + g
-    true_labels = y_test.iloc[start:end].values.reshape(1, -1)
-    pred_scores = y_pred[start:end].reshape(1, -1)
-
-    ndcg = ndcg_score(true_labels, pred_scores, k=8)
-    ndcg_scores.append(ndcg)
-
-    start = end
-
-model_ndcg = np.mean(ndcg_scores)
-print(f"🔥 Model Mean NDCG@8: {model_ndcg:.4f}")
+model_ndcg, skipped_model_groups, total_groups = mean_ndcg_by_group(
+    y_test, y_pred, test_groups, k=8
+)
+print(f"Model Mean NDCG@8: {model_ndcg:.4f}")
+print(f"Skipped groups (<2 docs): {skipped_model_groups}/{total_groups}")
 
 # -----------------------------
 # 7️⃣ Baseline Evaluation
 # -----------------------------
 baseline_scores = X_test["transition_probability"].values
 
-ndcg_scores_baseline = []
-start = 0
+baseline_ndcg, skipped_baseline_groups, _ = mean_ndcg_by_group(
+    y_test, baseline_scores, test_groups, k=8
+)
 
-for g in test_groups:
-    end = start + g
-    true_labels = y_test.iloc[start:end].values.reshape(1, -1)
-    pred_scores = baseline_scores[start:end].reshape(1, -1)
-
-    ndcg = ndcg_score(true_labels, pred_scores, k=8)
-    ndcg_scores_baseline.append(ndcg)
-
-    start = end
-
-baseline_ndcg = np.mean(ndcg_scores_baseline)
 print(f"Baseline Mean NDCG@8: {baseline_ndcg:.4f}")
-
-print(f"📈 Absolute Lift: {model_ndcg - baseline_ndcg:.4f}\n")
-
-# -----------------------------
-# 8️⃣ Segment-Level Evaluation
-# -----------------------------
-segment_results = {
-    "Budget": {"model": [], "baseline": []},
-    "Regular": {"model": [], "baseline": []},
-    "Premium": {"model": [], "baseline": []}
-}
-
-start = 0
-test_df = test_df.reset_index(drop=True)
-
-for g in test_groups:
-    end = start + g
-
-    true_labels = y_test.iloc[start:end].values.reshape(1, -1)
-    pred_scores_model = y_pred[start:end].reshape(1, -1)
-    pred_scores_baseline = baseline_scores[start:end].reshape(1, -1)
-
-    segment = test_df.iloc[start]["user_type"]
-
-    ndcg_model = ndcg_score(true_labels, pred_scores_model, k=8)
-    ndcg_baseline = ndcg_score(true_labels, pred_scores_baseline, k=8)
-
-    segment_results[segment]["model"].append(ndcg_model)
-    segment_results[segment]["baseline"].append(ndcg_baseline)
-
-    start = end
-
-print("\n--- 📊 Segment-Level Results ---")
-
-for segment in segment_results:
-    model_mean = np.mean(segment_results[segment]["model"])
-    baseline_mean = np.mean(segment_results[segment]["baseline"])
-    lift = model_mean - baseline_mean
-
-    print(f"\n{segment}:")
-    print(f"  Model NDCG@8: {model_mean:.4f}")
-    print(f"  Baseline NDCG@8: {baseline_mean:.4f}")
-    print(f"  Absolute Lift: {lift:.4f}")
+print(f"Baseline skipped groups (<2 docs): {skipped_baseline_groups}/{total_groups}")
+print(f"Absolute Lift: {model_ndcg - baseline_ndcg:.4f}\n")
 
 # -----------------------------
-# 9️⃣ Feature Importance
+# 8️⃣ Feature Importance
 # -----------------------------
 importance_df = pd.DataFrame({
     "feature": feature_cols,
     "importance": model.feature_importances_
 }).sort_values("importance", ascending=False)
 
-print("\n--- 🔍 Feature Importance ---")
+print("\n--- Feature Importance ---")
 print(importance_df)
 
-# Save Model
+# -----------------------------
+# 9️⃣ Save Model
+# -----------------------------
 model.booster_.save_model("csao_lambdarank_model.txt")
-print("\n✅ Model saved as csao_lambdarank_model.txt")
+print("\nModel saved as csao_lambdarank_model.txt")
+
+
