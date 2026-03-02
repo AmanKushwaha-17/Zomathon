@@ -510,7 +510,7 @@ with cols[4]:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# ─── Cart + Recommendations Side by Side ──────────────────
+# ─── Cart + AI Tooltip (Left) | Recommendations Grid (Right) ──
 left_col, right_col = st.columns([1, 2])
 
 with left_col:
@@ -549,6 +549,23 @@ with left_col:
     </div>
     """, unsafe_allow_html=True)
 
+    # ─── LLM Tooltip (directly below cart) ────────────────
+    if not top8.empty:
+        cart_name = cart_df.iloc[-1]["item_name"]
+        rec_name = top8.iloc[0]["item_name"]
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        with st.expander("✨ AI Suggestion (Groq Llama 3.1 8B)", expanded=True):
+            with st.spinner("Generating explanation..."):
+                tooltip = get_llm_tooltip(cart_name, rec_name)
+
+            st.markdown(f"""
+            <div class="tooltip-card">
+                <div class="tooltip-label">AI Generated Insight</div>
+                <div class="tooltip-text">"{tooltip}"</div>
+            </div>
+            """, unsafe_allow_html=True)
+
 
 with right_col:
     st.markdown("### 🎯 Top 8 Recommendations")
@@ -556,46 +573,51 @@ with right_col:
     if top8.empty:
         st.warning("No candidates found for this restaurant.")
     else:
-        for rank_idx, (_, row) in enumerate(top8.iterrows()):
+        top8_list = list(top8.iterrows())
+
+        # Row 1: items 1-4
+        row1_cols = st.columns(4)
+        for col_idx, (_, row) in zip(range(4), top8_list[:4]):
             color = CATEGORY_COLORS.get(row["category"], "#888")
             relevance = row["relevance"]
+            with row1_cols[col_idx]:
+                st.markdown(f"""
+                <div class="rec-card" style="border-left-color: {color}; min-height: 160px;">
+                    <div class="rec-rank">#{col_idx + 1}</div>
+                    <div class="rec-name">{row["item_name"]}</div>
+                    <div class="rec-meta">
+                        <span class="category-badge" style="background: {color}22; color: {color};">{row["category"]}</span>
+                        <span style="margin-left: 0.3rem; color: rgba(255,255,255,0.5); font-size: 0.8rem;">Rs.{int(row["price"])}</span>
+                    </div>
+                    <div style="text-align: right; margin-top: 0.5rem;">
+                        <span style="color: {color}; font-size: 1.3rem; font-weight: 700;">{relevance:.0f}%</span>
+                    </div>
+                    <div class="relevance-bar">
+                        <div class="relevance-fill" style="width: {relevance}%; background: linear-gradient(90deg, {color}, {color}88);"></div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
 
-            st.markdown(f"""
-            <div class="rec-card" style="border-left-color: {color};">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div>
-                        <div class="rec-rank">#{rank_idx + 1} Recommendation</div>
+        # Row 2: items 5-8
+        if len(top8_list) > 4:
+            row2_cols = st.columns(4)
+            for col_idx, (_, row) in zip(range(4), top8_list[4:8]):
+                color = CATEGORY_COLORS.get(row["category"], "#888")
+                relevance = row["relevance"]
+                with row2_cols[col_idx]:
+                    st.markdown(f"""
+                    <div class="rec-card" style="border-left-color: {color}; min-height: 160px;">
+                        <div class="rec-rank">#{col_idx + 5}</div>
                         <div class="rec-name">{row["item_name"]}</div>
                         <div class="rec-meta">
                             <span class="category-badge" style="background: {color}22; color: {color};">{row["category"]}</span>
-                            <span style="margin-left: 0.5rem; color: rgba(255,255,255,0.5);">Rs.{int(row["price"])}</span>
+                            <span style="margin-left: 0.3rem; color: rgba(255,255,255,0.5); font-size: 0.8rem;">Rs.{int(row["price"])}</span>
+                        </div>
+                        <div style="text-align: right; margin-top: 0.5rem;">
+                            <span style="color: {color}; font-size: 1.3rem; font-weight: 700;">{relevance:.0f}%</span>
+                        </div>
+                        <div class="relevance-bar">
+                            <div class="relevance-fill" style="width: {relevance}%; background: linear-gradient(90deg, {color}, {color}88);"></div>
                         </div>
                     </div>
-                    <div style="text-align: right; min-width: 80px;">
-                        <div style="color: {color}; font-size: 1.4rem; font-weight: 700;">{relevance:.0f}%</div>
-                        <div style="color: rgba(255,255,255,0.4); font-size: 0.7rem;">relevance</div>
-                    </div>
-                </div>
-                <div class="relevance-bar">
-                    <div class="relevance-fill" style="width: {relevance}%; background: linear-gradient(90deg, {color}, {color}88);"></div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-# ─── LLM Tooltip ──────────────────────────────────────────
-st.markdown("<br>", unsafe_allow_html=True)
-
-if not top8.empty:
-    cart_name = cart_df.iloc[-1]["item_name"]
-    rec_name = top8.iloc[0]["item_name"]
-
-    with st.expander("✨ AI-Powered Suggestion (Groq Llama 3.1 8B)", expanded=True):
-        with st.spinner("Generating explanation..."):
-            tooltip = get_llm_tooltip(cart_name, rec_name)
-
-        st.markdown(f"""
-        <div class="tooltip-card">
-            <div class="tooltip-label">AI Generated Insight</div>
-            <div class="tooltip-text">"{tooltip}"</div>
-        </div>
-        """, unsafe_allow_html=True)
+                    """, unsafe_allow_html=True)
